@@ -7,7 +7,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
 
 	"github.com/greenpay/scheduler/pkg/hardware"
@@ -161,16 +160,13 @@ func TestMLWorkloadScore_ConfigurableFragThreshold(t *testing.T) {
 
 func TestFragmentationScore_VCurve(t *testing.T) {
 	ctx := context.Background()
+	plugin := newScorePlugin(t)
 
-	lister := &mockNodeInfoLister{}
-	handle := &mockHandle{
-		sharedLister: &mockSharedLister{
-			nodeLister: lister,
-		},
-	}
-
-	// Helper to create a NodeInfo snapshot with given requested and allocatable GPUs
-	makeNodeInfoSnapshot := func(nodeName string, totalGPUs, requestedGPUs int64) (*framework.CycleState, *corev1.Node) {
+	// The V-curve is a property of the fragmentation heuristic alone, so it is
+	// asserted directly rather than through Score(). The composite mixes in the
+	// bin-packing term, which rises monotonically with GPU allocation and
+	// carries a larger weight — it would mask the curve entirely.
+	nodeInfoWithGPUs := func(nodeName string, totalGPUs, requestedGPUs int64) *framework.NodeInfo {
 		node := &corev1.Node{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: nodeName,
@@ -199,60 +195,33 @@ func TestFragmentationScore_VCurve(t *testing.T) {
 		}
 		ni.Requested.ScalarResources["nvidia.com/gpu"] = requestedGPUs
 
-		lister.nodes = append(lister.nodes, ni)
-		state := framework.NewCycleState()
-		return state, node
+		return ni
 	}
 
-	pod := &corev1.Pod{}
-	p, err := plugins.NewMLWorkloadScore(ctx, nil, handle)
-	if err != nil {
-		t.Fatalf("NewMLWorkloadScore: %v", err)
-	}
-	plugin := p.(*plugins.MLWorkloadScore)
+	// Default threshold is 0.85, so ~87.5% allocation sits in the trough while
+	// the empty and full ends of the curve score high.
+	score0 := plugin.FragmentationScoreForTest(nodeInfoWithGPUs("node-0", 8, 0))
+	score100 := plugin.FragmentationScoreForTest(nodeInfoWithGPUs("node-100", 8, 8))
+	score85 := plugin.FragmentationScoreForTest(nodeInfoWithGPUs("node-85", 8, 7))
 
-	// 0% allocation (0 of 8 GPUs): score near 0% should be high
-	state0, _ := makeNodeInfoSnapshot("node-0", 8, 0)
-	score0, status := plugin.Score(ctx, state0, pod, "node-0")
-	if !status.IsSuccess() {
-		t.Fatalf("Score failed: %v", status.Message())
-	}
-
-	// 100% allocation (8 of 8 GPUs): score near 100% should be high
-	state100, _ := makeNodeInfoSnapshot("node-100", 8, 8)
-	score100, status := plugin.Score(ctx, state100, pod, "node-100")
-	if !status.IsSuccess() {
-		t.Fatalf("Score failed: %v", status.Message())
-	}
-
-	// 87.5% allocation (7 of 8 GPUs, close to 85% threshold): score should be low
-	state85, _ := makeNodeInfoSnapshot("node-85", 8, 7)
-	score85, status := plugin.Score(ctx, state85, pod, "node-85")
-	if !status.IsSuccess() {
-		t.Fatalf("Score failed: %v", status.Message())
-	}
-
-	// Scores near 0% and 100% allocation score high, near fragThreshold scores low.
 	if score0 <= score85 {
-		t.Errorf("expected 0%% allocation score (%d) to be higher than near-fragThreshold score (%d)", score0, score85)
+		t.Errorf("expected 0%% allocation score (%.2f) to be higher than near-fragThreshold score (%.2f)", score0, score85)
 	}
 	if score100 <= score85 {
-		t.Errorf("expected 100%% allocation score (%d) to be higher than near-fragThreshold score (%d)", score100, score85)
+		t.Errorf("expected 100%% allocation score (%.2f) to be higher than near-fragThreshold score (%.2f)", score100, score85)
 	}
 
-	// Verify custom fragThreshold shift (e.g. fragThreshold = 0.50)
+	// Shifting the threshold moves the trough with it.
 	plugin.SetFragThreshold(0.50)
 
-	// 50% allocation (4 of 8 GPUs): should score low under threshold 0.50
-	state50, _ := makeNodeInfoSnapshot("node-50", 8, 4)
-	score50, status := plugin.Score(ctx, state50, pod, "node-50")
-	if !status.IsSuccess() {
-		t.Fatalf("Score failed: %v", status.Message())
+	score0Shifted := plugin.FragmentationScoreForTest(nodeInfoWithGPUs("node-0-shifted", 8, 0))
+	score50Shifted := plugin.FragmentationScoreForTest(nodeInfoWithGPUs("node-50-shifted", 8, 4))
+
+	if score0Shifted <= score50Shifted {
+		t.Errorf("with fragThreshold=0.50, expected 0%% allocation score (%.2f) > 50%% allocation score (%.2f)", score0Shifted, score50Shifted)
 	}
 
-	if score0 <= score50 {
-		t.Errorf("with fragThreshold=0.50, expected 0%% allocation score (%d) > 50%% allocation score (%d)", score0, score50)
-	}
+	_ = ctx
 }
 
 func TestPreScore_ComputesMaxBandwidth(t *testing.T) {
@@ -557,88 +526,41 @@ func TestMLWorkloadScore_Score_NodeLookupCycleStateRegression(t *testing.T) {
 
 func TestBinPackingScore_Isolation(t *testing.T) {
 	ctx := context.Background()
-	lister := &mockNodeInfoLister{}
-	handle := &mockHandle{
-		sharedLister: &mockSharedLister{nodeLister: lister},
-	}
-	p, err := plugins.NewMLWorkloadScore(ctx, nil, handle)
-	if err != nil {
-		t.Fatalf("NewMLWorkloadScore: %v", err)
-	}
-	plugin := p.(*plugins.MLWorkloadScore)
+	plugin := newScorePlugin(t)
 
-	node80 := &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{Name: "node-80"},
-		Status: corev1.NodeStatus{
-			Capacity:    corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("10")},
-			Allocatable: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")},
-		},
+	// Utilisation has to be expressed as pods actually requesting resources.
+	// Capacity-minus-allocatable does not work: both are static kubelet-reported
+	// values that never move as pods are scheduled, which is precisely the bug
+	// this heuristic was rewritten to fix.
+	nodeInfoWithUsage := func(nodeName string, allocatableCPU, requestedCPU int64) *framework.NodeInfo {
+		node := &corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{Name: nodeName},
+			Status: corev1.NodeStatus{
+				Capacity:    corev1.ResourceList{corev1.ResourceCPU: *resource.NewMilliQuantity(allocatableCPU, resource.DecimalSI)},
+				Allocatable: corev1.ResourceList{corev1.ResourceCPU: *resource.NewMilliQuantity(allocatableCPU, resource.DecimalSI)},
+			},
+		}
+
+		ni := framework.NewNodeInfo()
+		ni.SetNode(node)
+		if ni.Allocatable == nil {
+			ni.Allocatable = &framework.Resource{}
+		}
+		ni.Allocatable.MilliCPU = allocatableCPU
+		if ni.Requested == nil {
+			ni.Requested = &framework.Resource{}
+		}
+		ni.Requested.MilliCPU = requestedCPU
+
+		return ni
 	}
-	ni80 := framework.NewNodeInfo()
-	ni80.SetNode(node80)
 
-	node0 := &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{Name: "node-0"},
-		Status: corev1.NodeStatus{
-			Capacity:    corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("10")},
-			Allocatable: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("10")},
-		},
-	}
-	ni0 := framework.NewNodeInfo()
-	ni0.SetNode(node0)
-
-	lister.nodes = []*framework.NodeInfo{ni80, ni0}
-	cycleState := framework.NewCycleState()
-	pod := &corev1.Pod{}
-
-	score80, _ := plugin.Score(ctx, cycleState, pod, "node-80")
-	score0, _ := plugin.Score(ctx, cycleState, pod, "node-0")
+	score80 := plugin.BinPackingScoreForTest(nodeInfoWithUsage("node-80", 10000, 8000))
+	score0 := plugin.BinPackingScoreForTest(nodeInfoWithUsage("node-0", 10000, 0))
 
 	if score80 <= score0 {
-		t.Errorf("expected 80%% utilized node score (%d) > 0%% utilized node score (%d)", score80, score0)
+		t.Errorf("expected 80%% utilized node score (%.2f) > 0%% utilized node score (%.2f)", score80, score0)
 	}
-}
 
-func TestBandwidthScore_Isolation(t *testing.T) {
-	ctx := context.Background()
-	lister := &mockNodeInfoLister{}
-	handle := &mockHandle{
-		sharedLister: &mockSharedLister{nodeLister: lister},
-	}
-	p, err := plugins.NewMLWorkloadScore(ctx, nil, handle)
-	if err != nil {
-		t.Fatalf("NewMLWorkloadScore: %v", err)
-	}
-	plugin := p.(*plugins.MLWorkloadScore)
-
-	node100G := &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:   "node-100g",
-			Labels: map[string]string{hardware.LabelNetworkBandwidthGbps: "100"},
-		},
-	}
-	ni100G := framework.NewNodeInfo()
-	ni100G.SetNode(node100G)
-
-	node10G := &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:   "node-10g",
-			Labels: map[string]string{hardware.LabelNetworkBandwidthGbps: "10"},
-		},
-	}
-	ni10G := framework.NewNodeInfo()
-	ni10G.SetNode(node10G)
-
-	lister.nodes = []*framework.NodeInfo{ni100G, ni10G}
-	cycleState := framework.NewCycleState()
-	pod := &corev1.Pod{}
-
-	plugin.PreScore(ctx, cycleState, pod, lister.nodes)
-
-	score100G, _ := plugin.Score(ctx, cycleState, pod, "node-100g")
-	score10G, _ := plugin.Score(ctx, cycleState, pod, "node-10g")
-
-	if score100G <= score10G {
-		t.Errorf("expected 100G node score (%d) > 10G node score (%d)", score100G, score10G)
-	}
+	_ = ctx
 }

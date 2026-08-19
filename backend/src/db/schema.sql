@@ -27,6 +27,12 @@ ALTER TABLE projects ADD COLUMN IF NOT EXISTS ai_summary_generated_at TIMESTAMPT
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS ai_summary_model        TEXT;
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS ai_summary_source_hash  TEXT;
 
+-- Reason recorded when an admin moves a project to 'rejected' (or 'paused') via
+-- PATCH /api/v1/projects/:id/status. Written by routes/projects.js and read back
+-- by store.js's mapProjectRow as `rejectionReason`; without this column that
+-- endpoint 500s on every status change.
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS rejection_reason        TEXT;
+
 CREATE TABLE IF NOT EXISTS donations (
   id UUID PRIMARY KEY,
   project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,

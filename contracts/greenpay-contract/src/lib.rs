@@ -317,8 +317,12 @@ impl GreenPayContract {
         if amount <= 0 {
             panic!("Donation amount must be positive");
         }
-        
-        if !env.storage().instance().has(&DataKey::AllowedToken(token.clone())) {
+
+        if !env
+            .storage()
+            .instance()
+            .has(&DataKey::AllowedToken(token.clone()))
+        {
             panic!("Token is not supported");
         }
 
@@ -793,9 +797,9 @@ mod tests {
             .register_stellar_asset_contract_v2(token_admin.clone())
             .address();
         let token_client = StellarAssetClient::new(&env, &token);
-        
+
         client.allow_token(&admin, &token);
-        
+
         (env, cid, client, admin, pid, token, token_client)
     }
 

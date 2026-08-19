@@ -107,7 +107,11 @@ impl EscrowContract {
         if env.storage().instance().has(&DataKey::Job(job_id.clone())) {
             panic!("Job already exists");
         }
-        if !env.storage().instance().has(&DataKey::AllowedToken(token.clone())) {
+        if !env
+            .storage()
+            .instance()
+            .has(&DataKey::AllowedToken(token.clone()))
+        {
             panic!("Token is not supported");
         }
 
@@ -607,4 +611,3 @@ mod tests {
         assert_eq!(token_client.balance(&client), 60);
     }
 }
-
