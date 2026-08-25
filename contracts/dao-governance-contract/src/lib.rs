@@ -132,6 +132,7 @@ pub enum DataKey {
     /// `lock_tokens` and `withdraw`). Used as the denominator for the
     /// proportional quorum so it never requires iterating over lockers.
     TotalLocked,
+    Paused,
 }
 
 // ─── Contract ────────────────────────────────────────────────────────────────
@@ -173,6 +174,7 @@ impl DaoGovernanceContract {
         env.storage().instance().set(&DataKey::Config, &config);
         env.storage().instance().set(&DataKey::ProposalCount, &0u64);
         env.storage().instance().set(&DataKey::TotalLocked, &0i128);
+        env.storage().instance().set(&DataKey::Paused, &false);
         env.storage()
             .instance()
             .extend_ttl(MIN_VOTING_WINDOW, MAX_LOCK_LEDGERS);
@@ -190,6 +192,7 @@ impl DaoGovernanceContract {
 
     pub fn lock_tokens(env: Env, voter: Address, amount: i128, lock_duration_ledgers: u32) {
         voter.require_auth();
+        Self::require_not_paused(&env);
         if amount <= 0 {
             panic!("amount must be positive");
         }
@@ -264,6 +267,7 @@ impl DaoGovernanceContract {
 
     pub fn extend_lock(env: Env, voter: Address, new_unlock_ledger: u32) {
         voter.require_auth();
+        Self::require_not_paused(&env);
         let lock_key = DataKey::Lock(voter.clone());
         if !env.storage().persistent().has(&lock_key) {
             panic!("no active lock");
@@ -311,6 +315,7 @@ impl DaoGovernanceContract {
 
     pub fn withdraw(env: Env, voter: Address) {
         voter.require_auth();
+        Self::require_not_paused(&env);
         let lock_key = DataKey::Lock(voter.clone());
         if !env.storage().persistent().has(&lock_key) {
             panic!("no lock found");
@@ -442,6 +447,52 @@ impl DaoGovernanceContract {
     // Consequently, `dao_admin` has the authority to unilaterally veto a passed
     // proposal by removing its target from the allowlist before execution occurs.
 
+    // ─── Emergency pause ────────────────────────────────────────────────────
+
+    pub fn pause(env: Env, caller: Address) {
+        caller.require_auth();
+        let config: Config = env
+            .storage()
+            .instance()
+            .get(&DataKey::Config)
+            .expect("Not initialized");
+        if config.dao_admin != caller {
+            panic!("Only admin can pause");
+        }
+        env.storage().instance().set(&DataKey::Paused, &true);
+    }
+
+    pub fn unpause(env: Env, caller: Address) {
+        caller.require_auth();
+        let config: Config = env
+            .storage()
+            .instance()
+            .get(&DataKey::Config)
+            .expect("Not initialized");
+        if config.dao_admin != caller {
+            panic!("Only admin can unpause");
+        }
+        env.storage().instance().set(&DataKey::Paused, &false);
+    }
+
+    pub fn is_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
+    }
+
+    fn require_not_paused(env: &Env) {
+        let paused: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false);
+        if paused {
+            panic!("Contract is paused");
+        }
+    }
+
     /// Adds a `(target_contract, function)` pair to the execution allowlist.
     ///
     /// # Access Control
@@ -530,6 +581,7 @@ impl DaoGovernanceContract {
         calldata: Bytes,
     ) -> u64 {
         proposer.require_auth();
+        Self::require_not_paused(&env);
         let current = env.ledger().sequence();
         let power = Self::get_voting_power(env.clone(), proposer.clone(), current);
         if power <= 0 {
@@ -763,6 +815,7 @@ impl DaoGovernanceContract {
     /// time. If `dao_admin` removed the target entry mid-flight (during discussion,
     /// voting, or timelock), execution panics with `"target/function not allowlisted"`.
     pub fn execute_proposal(env: Env, proposal_id: u64) {
+        Self::require_not_paused(&env);
         let key = DataKey::Proposal(proposal_id);
         let proposal: Proposal = env
             .storage()
@@ -2527,5 +2580,65 @@ mod tests {
         env.ledger().set_sequence_number(p.executable_from_ledger);
         client.execute_proposal(&pid);
         assert_eq!(client.get_proposal(&pid).stage, ProposalStage::Executed);
+    }
+
+    // ─── Pause / emergency-stop tests ──────────────────────────────────────
+
+    #[test]
+    fn test_pause_and_unpause() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_cid, cfg, client) = deploy(&env);
+        assert!(!client.is_paused());
+        client.pause(&cfg.dao_admin);
+        assert!(client.is_paused());
+        client.unpause(&cfg.dao_admin);
+        assert!(!client.is_paused());
+    }
+
+    #[test]
+    #[should_panic(expected = "Only admin can pause")]
+    fn test_pause_non_admin_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_cid, _cfg, client) = deploy(&env);
+        let rando = Address::generate(&env);
+        client.pause(&rando);
+    }
+
+    #[test]
+    #[should_panic(expected = "Contract is paused")]
+    fn test_lock_tokens_rejected_when_paused() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_cid, cfg, client) = deploy(&env);
+        client.pause(&cfg.dao_admin);
+        let voter = Address::generate(&env);
+        let token = StellarAssetClient::new(&env, &cfg.gp_token);
+        token.mint(&voter, &1_000_000);
+        client.lock_tokens(&voter, &1_000_000, &MIN_LOCK_LEDGERS);
+    }
+
+    #[test]
+    #[should_panic(expected = "Contract is paused")]
+    fn test_create_proposal_rejected_when_paused() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_cid, cfg, client) = deploy(&env);
+        let proposer = Address::generate(&env);
+        let token = StellarAssetClient::new(&env, &cfg.gp_token);
+        token.mint(&proposer, &1_000_000);
+        client.lock_tokens(&proposer, &1_000_000, &MIN_LOCK_LEDGERS);
+        client.pause(&cfg.dao_admin);
+        let target = Address::generate(&env);
+        let function = Symbol::new(&env, "do_thing");
+        client.create_proposal(
+            &proposer,
+            &soroban_sdk::String::from_str(&env, "Title"),
+            &soroban_sdk::String::from_str(&env, "Desc"),
+            &target,
+            &function,
+            &soroban_sdk::Bytes::new(&env),
+        );
     }
 }
