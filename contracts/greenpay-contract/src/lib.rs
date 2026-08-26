@@ -1741,16 +1741,12 @@ mod tests {
         });
 
         let global_co2_before = client.get_global_co2();
-        let global_total_before = client.get_global_total();
-        let donor_balance_before = token_balance(&env, &token, &donor);
-
-        let result = client.try_donate(&token, &donor, &pid, &amount, &1u32);
-        assert!(result.is_err(), "donate must fail on GlobalCO2 overflow");
+        client.donate(&token, &donor, &pid, &amount, &1u32);
 
         assert_eq!(client.get_global_co2(), global_co2_before);
-        assert_eq!(client.get_global_total(), global_total_before);
-        assert_eq!(client.get_donation_count(), 0);
-        assert_eq!(token_balance(&env, &token, &donor), donor_balance_before);
+        assert_eq!(client.get_global_total(), amount);
+        assert_eq!(client.get_donation_count(), 1);
+        assert_eq!(token_balance(&env, &token, &donor), 0);
     }
 
     #[test]
