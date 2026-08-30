@@ -13,7 +13,7 @@
  */
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import NetInfo from '@react-native-community/netinfo';
-import { API_URL } from './api';
+import { apiFetch } from './api';
 import type { FunnelStage, OnboardingPathId } from './onboarding';
 
 const SESSION_KEY = 'greenpay_onboarding_session';
@@ -31,7 +31,7 @@ async function postTelemetry<T>(path: string, body: unknown): Promise<T | null> 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TELEMETRY_TIMEOUT_MS);
   try {
-    const response = await fetch(`${API_URL}${path}`, {
+    const response = await apiFetch(path, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),

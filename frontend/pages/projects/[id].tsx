@@ -13,7 +13,7 @@ import CircularProgress from "@/components/CircularProgress";
 import MonthlyGivingSetup from "@/components/MonthlyGivingSetup";
 import DescriptionAccordion from "@/components/DescriptionAccordion";
 import ImpactClaimCard from "@/components/ImpactClaimCard";
-import { createProjectCampaign, fetchImpactProject, fetchProject, fetchProjectMatches, fetchProjectUpdates, fetchSubscriberCount, generateProjectSummary, getApiErrorMessage, subscribeToProject, toggleUpdateLike } from "@/lib/api";
+import { createProjectCampaign, fetchImpactProject, fetchProject, fetchProjectMatches, fetchProjectUpdateHistory, fetchProjectUpdates, fetchSubscriberCount, generateProjectSummary, getApiErrorMessage, reportProjectUpdate, subscribeToProject, toggleUpdateLike } from "@/lib/api";
 import type { ImpactProjectStats } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
 import ContentLanguageNotice from "@/components/ContentLanguageNotice";
@@ -26,8 +26,11 @@ import type {
   Donation,
   ProjectCampaign,
   ProjectUpdate,
+  ProjectUpdateHistory,
+  ProjectUpdateReportReason,
 } from "@/utils/types";
 import { useWishlist } from "@/hooks/useWishlist";
+import { renderMarkdown } from "@/lib/safeMarkdown";
 
 interface ProjectDetailProps {
   publicKey: string | null;
@@ -45,6 +48,14 @@ export default function ProjectDetail({
   const [project, setProject] = useState<ClimateProject | null>(null);
   const [updates, setUpdates] = useState<ProjectUpdate[]>([]);
   const [updateLikes, setUpdateLikes] = useState<Record<string, { liked: boolean; likeCount: number }>>({});
+  const [expandedHistoryId, setExpandedHistoryId] = useState<string | null>(null);
+  const [updateHistories, setUpdateHistories] = useState<Record<string, ProjectUpdateHistory>>({});
+  const [historyLoadingId, setHistoryLoadingId] = useState<string | null>(null);
+  const [reportingUpdateId, setReportingUpdateId] = useState<string | null>(null);
+  const [reportReason, setReportReason] = useState<ProjectUpdateReportReason>("fraudulent_claim");
+  const [reportDetails, setReportDetails] = useState("");
+  const [reportState, setReportState] = useState<"idle" | "submitting" | "success" | "error">("idle");
+  const [reportError, setReportError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshKey, setRefreshKey] = useState(0);
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'error'>('idle');
@@ -162,6 +173,54 @@ export default function ProjectDetail({
       setUpdateLikes((prev) => ({ ...prev, [updateId]: result }));
     } catch {
       // silently fail
+    }
+  };
+
+  const handleToggleHistory = async (updateId: string) => {
+    if (expandedHistoryId === updateId) {
+      setExpandedHistoryId(null);
+      return;
+    }
+    setExpandedHistoryId(updateId);
+    if (updateHistories[updateId]) return;
+    setHistoryLoadingId(updateId);
+    try {
+      const history = await fetchProjectUpdateHistory(updateId);
+      setUpdateHistories((previous) => ({ ...previous, [updateId]: history }));
+    } catch {
+      setUpdateHistories((previous) => ({
+        ...previous,
+        [updateId]: { currentRevision: 1, editedAt: null, revisions: [] },
+      }));
+    } finally {
+      setHistoryLoadingId(null);
+    }
+  };
+
+  const openReportForm = (updateId: string) => {
+    setReportingUpdateId(updateId);
+    setReportReason("fraudulent_claim");
+    setReportDetails("");
+    setReportState("idle");
+    setReportError(null);
+  };
+
+  const handleReportUpdate = async (event: React.FormEvent, updateId: string) => {
+    event.preventDefault();
+    if (!publicKey) return;
+    setReportState("submitting");
+    setReportError(null);
+    try {
+      await reportProjectUpdate({
+        updateId,
+        donorAddress: publicKey,
+        reason: reportReason,
+        details: reportDetails.trim() || undefined,
+      });
+      setReportState("success");
+    } catch (error) {
+      setReportState("error");
+      setReportError(getApiErrorMessage(error, "Report could not be submitted."));
     }
   };
 
@@ -988,20 +1047,30 @@ export default function ProjectDetail({
                       dir={u.contentDirection}
                       lang={u.contentLanguage}
                     >
-                      <div className="flex items-center justify-between mb-2">
+                      <div className="flex items-start justify-between gap-3 mb-2">
                         <h3 className="font-semibold text-forest-900 text-sm font-body">
                           {u.title}
                         </h3>
-                        <span className="text-xs text-[#547454] font-body">
-                          {timeAgo(u.createdAt)}
-                        </span>
+                        <div className="flex flex-wrap justify-end items-center gap-1.5 text-xs font-body">
+                          {u.isEdited && (
+                            <span className="rounded-full bg-amber-50 px-2 py-0.5 text-amber-800">
+                              Edited · revision {u.revision}
+                            </span>
+                          )}
+                          {u.underReview && (
+                            <span className="rounded-full bg-sky-50 px-2 py-0.5 text-sky-800">
+                              Published · review pending
+                            </span>
+                          )}
+                          <span className="text-[#547454]">{timeAgo(u.createdAt)}</span>
+                        </div>
                       </div>
                       <div
                         className="text-[#4b654b] text-sm leading-relaxed font-body prose prose-sm max-w-none"
                         dangerouslySetInnerHTML={{ __html: renderMarkdown(u.body) }}
                       />
                       <div className="mt-2"><ContentLanguageNotice content={u} /></div>
-                      <div className="flex items-center gap-3 mt-2">
+                      <div className="flex flex-wrap items-center gap-3 mt-2">
                         <button
                           onClick={() => handleToggleLike(u.id)}
                           disabled={!publicKey}
@@ -1014,7 +1083,105 @@ export default function ProjectDetail({
                           <span>{like?.liked ? "❤️" : "🤍"}</span>
                           <span>{like?.likeCount ?? 0}</span>
                         </button>
+                        {u.isEdited && (
+                          <button
+                            type="button"
+                            onClick={() => handleToggleHistory(u.id)}
+                            className="text-xs font-body text-forest-700 hover:underline"
+                          >
+                            {expandedHistoryId === u.id ? "Hide edit history" : "View edit history"}
+                          </button>
+                        )}
+                        {publicKey && (
+                          <button
+                            type="button"
+                            onClick={() => reportingUpdateId === u.id
+                              ? setReportingUpdateId(null)
+                              : openReportForm(u.id)}
+                            className="text-xs font-body text-[#76553a] hover:underline"
+                          >
+                            {reportingUpdateId === u.id ? "Cancel report" : "Report update"}
+                          </button>
+                        )}
                       </div>
+                      {expandedHistoryId === u.id && (
+                        <div className="mt-3 rounded-lg border border-forest-100 bg-forest-50/40 p-3">
+                          <p className="text-xs font-semibold text-forest-900 mb-2">Public edit history</p>
+                          {historyLoadingId === u.id ? (
+                            <p className="text-xs text-[#547454]">Loading history…</p>
+                          ) : (updateHistories[u.id]?.revisions.length ?? 0) === 0 ? (
+                            <p className="text-xs text-[#547454]">No earlier public revision is available.</p>
+                          ) : (
+                            <div className="space-y-3">
+                              {updateHistories[u.id].revisions.map((revision) => (
+                                <div key={revision.revision} className="border-t border-forest-100 pt-2 first:border-0 first:pt-0">
+                                  <p className="text-xs font-semibold text-forest-800">
+                                    Revision {revision.revision} · replaced {timeAgo(revision.replacedAt)}
+                                  </p>
+                                  <p className="text-xs text-[#547454] mt-0.5">Reason: {revision.editReason}</p>
+                                  <p className="text-xs font-medium text-forest-900 mt-2">{revision.title}</p>
+                                  <div
+                                    className="text-xs text-[#4b654b] mt-1 prose prose-sm max-w-none"
+                                    dangerouslySetInnerHTML={{ __html: renderMarkdown(revision.body) }}
+                                  />
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                      {reportingUpdateId === u.id && (
+                        <form
+                          className="mt-3 rounded-lg border border-amber-200 bg-amber-50/50 p-3 space-y-2"
+                          onSubmit={(event) => handleReportUpdate(event, u.id)}
+                        >
+                          <p className="text-xs font-semibold text-amber-950">
+                            Reports are reviewed by moderators and do not automatically hide an update.
+                          </p>
+                          {reportState === "success" ? (
+                            <p role="status" className="text-xs text-green-700">
+                              Report submitted. A moderator will review it.
+                            </p>
+                          ) : (
+                            <>
+                              <label className="block text-xs text-amber-950">
+                                Reason
+                                <select
+                                  value={reportReason}
+                                  onChange={(event) => setReportReason(event.target.value as ProjectUpdateReportReason)}
+                                  className="input-field mt-1 w-full text-sm"
+                                >
+                                  <option value="fraudulent_claim">Unsupported or misleading impact claim</option>
+                                  <option value="abuse">Abuse or harassment</option>
+                                  <option value="spam">Spam</option>
+                                  <option value="off_topic_solicitation">Off-topic solicitation</option>
+                                  <option value="dangerous_content">Dangerous content</option>
+                                  <option value="privacy">Personal or private information</option>
+                                  <option value="other">Other</option>
+                                </select>
+                              </label>
+                              <label className="block text-xs text-amber-950">
+                                Details (optional)
+                                <textarea
+                                  value={reportDetails}
+                                  maxLength={2000}
+                                  onChange={(event) => setReportDetails(event.target.value)}
+                                  className="input-field mt-1 min-h-20 w-full text-sm"
+                                  placeholder="Describe the specific statement or policy concern."
+                                />
+                              </label>
+                              {reportError && <p role="alert" className="text-xs text-red-700">{reportError}</p>}
+                              <button
+                                type="submit"
+                                disabled={reportState === "submitting"}
+                                className="btn-primary px-3 py-1.5 text-xs disabled:opacity-60"
+                              >
+                                {reportState === "submitting" ? "Submitting…" : "Submit report"}
+                              </button>
+                            </>
+                          )}
+                        </form>
+                      )}
                     </div>
                   );
                 })}
@@ -1292,94 +1459,6 @@ export default function ProjectDetail({
       )}
     </div>
   );
-}
-
-/** Helper to escape HTML text nodes. */
-function escapeHtml(str: string): string {
-  return str
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
-
-/** Helper to escape HTML attribute values. */
-function escapeAttr(str: string): string {
-  return str
-    .replace(/&/g, "&amp;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}
-
-/** Validates scheme for href attributes (http, https, mailto). */
-function isValidScheme(url: string): boolean {
-  const trimmed = url.trim();
-  return /^(?:https?:\/\/|mailto:)/i.test(trimmed);
-}
-
-/** Formats inline text (escape HTML + handle nested bold/italic if any). */
-function renderInlineFormatting(str: string): string {
-  if (/\x00TOK_\d+\x00/.test(str)) {
-    return str;
-  }
-  let res = escapeHtml(str);
-  res = res.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
-  res = res.replace(/\*(.+?)\*/g, "<em>$1</em>");
-  return res;
-}
-
-/** Simple markdown-to-HTML: bold, italic, links, line breaks. */
-export function renderMarkdown(text: string): string {
-  if (!text) return "";
-
-  const tokens: string[] = [];
-  const addToken = (htmlSnippet: string): string => {
-    const id = tokens.length;
-    tokens.push(htmlSnippet);
-    return `\x00TOK_${id}\x00`;
-  };
-
-  // 1. Process links: [text](url)
-  let processed = text.replace(
-    /\[([^\]]+)\]\(([^)]+)\)/g,
-    (match, rawLabel, rawUrl) => {
-      if (!isValidScheme(rawUrl)) {
-        return match;
-      }
-      const href = escapeAttr(rawUrl.trim());
-      const labelHtml = renderInlineFormatting(rawLabel);
-      const tag = `<a href="${href}" target="_blank" rel="noopener noreferrer" class="text-forest-600 hover:underline">${labelHtml}</a>`;
-      return addToken(tag);
-    },
-  );
-
-  // 2. Process bold: **text**
-  processed = processed.replace(/\*\*(.+?)\*\*/g, (_, content) => {
-    const formatted = renderInlineFormatting(content);
-    return addToken(`<strong>${formatted}</strong>`);
-  });
-
-  // 3. Process italic: *text*
-  processed = processed.replace(/\*(.+?)\*/g, (_, content) => {
-    const formatted = renderInlineFormatting(content);
-    return addToken(`<em>${formatted}</em>`);
-  });
-
-  // 4. Escape all remaining unformatted text
-  processed = escapeHtml(processed);
-
-  // 5. Convert line breaks
-  processed = processed.replace(/\n/g, "<br />");
-
-  // 6. Restore tokens in reverse order
-  for (let i = tokens.length - 1; i >= 0; i--) {
-    processed = processed.replace(`\x00TOK_${i}\x00`, tokens[i]);
-  }
-
-  return processed;
 }
 
 function formatCountdown(deadline: string, nowMs: number) {

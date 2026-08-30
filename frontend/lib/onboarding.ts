@@ -80,7 +80,7 @@ async function post<T>(path: string, body: unknown): Promise<T> {
 }
 
 async function get<T>(path: string): Promise<T> {
-  const response = await fetch(`${API_BASE}/api/v1/onboarding${path}`, { credentials: "include" });
+  const response = await csrfFetch(`${API_BASE}/api/v1/onboarding${path}`, { credentials: "include" });
   return parseApiFetchResponse<T>(response);
 }
 

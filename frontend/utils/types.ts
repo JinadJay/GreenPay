@@ -259,6 +259,18 @@ export interface ProjectUpdate {
   body: string;
   imageUrl?: string;
   createdAt: string;
+  publishedAt?: string | null;
+  editedAt?: string | null;
+  revision?: number;
+  moderationStatus?:
+    | "pending"
+    | "published_pending_review"
+    | "published"
+    | "rejected"
+    | "removed"
+    | "appealed";
+  isEdited?: boolean;
+  underReview?: boolean;
   sourceLanguage?: "en" | "es" | "ar";
   contentLanguage?: "en" | "es" | "ar";
   contentDirection?: "ltr" | "rtl";
@@ -266,6 +278,30 @@ export interface ProjectUpdate {
   usedFallback?: boolean;
   machineTranslated?: boolean;
 }
+
+export interface ProjectUpdateRevision {
+  revision: number;
+  title: string;
+  body: string;
+  sourceLanguage: "en" | "es" | "ar";
+  editReason: string;
+  replacedAt: string;
+}
+
+export interface ProjectUpdateHistory {
+  currentRevision: number;
+  editedAt: string | null;
+  revisions: ProjectUpdateRevision[];
+}
+
+export type ProjectUpdateReportReason =
+  | "fraudulent_claim"
+  | "abuse"
+  | "spam"
+  | "off_topic_solicitation"
+  | "dangerous_content"
+  | "privacy"
+  | "other";
 
 /**
  * Leaderboard entry representing a donor's rank and totals.
