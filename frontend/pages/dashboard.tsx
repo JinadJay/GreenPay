@@ -8,7 +8,7 @@ import EditProfileForm from "@/components/EditProfileForm";
 import ProjectCard from "@/components/ProjectCard";
 import ImpactCertificate from "@/components/ImpactCertificate";
 import ProjectRating from "@/components/ProjectRating";
-import { fetchProfile, fetchDonorHistory, fetchImpactDonor, fetchProjects } from "@/lib/api";
+import { API_CLIENT_HEADERS, fetchProfile, fetchDonorHistory, fetchImpactDonor, fetchProjects } from "@/lib/api";
 import type { ImpactDonorStats } from "@/lib/api";
 import { getDueMonthlySubscriptions } from "@/lib/monthlyGiving";
 import { getXLMBalance, getFriendBotFunding, NETWORK } from "@/lib/stellar";
@@ -59,7 +59,9 @@ export default function Dashboard({ publicKey, onConnect }: DashboardProps) {
         setSavedProjects(projectResponse.projects.filter(proj => wishlist.includes(proj.id)));
         
         // Fetch pending rating
-        return fetch(`${process.env.NEXT_PUBLIC_API_URL || ""}/api/v1/ratings/pending?donorAddress=${publicKey}`);
+        return fetch(`${process.env.NEXT_PUBLIC_API_URL || ""}/api/v1/ratings/pending?donorAddress=${publicKey}`, {
+          headers: API_CLIENT_HEADERS,
+        });
       })
       .then(r => r?.json())
       .then(res => {

@@ -67,8 +67,10 @@ async function runMigrations() {
 
     for (const update of seedDemoData ? seedProjectUpdates : []) {
       await client.query(
-        `INSERT INTO project_updates (id, project_id, title, body, created_at)
-         VALUES ($1, $2, $3, $4, $5)
+        `INSERT INTO project_updates (
+           id, project_id, title, body, created_at, moderation_status, published_at
+         )
+         VALUES ($1, $2, $3, $4, $5, 'published', $5)
          ON CONFLICT (id) DO NOTHING`,
         [update.id, update.projectId, update.title, update.body, update.createdAt],
       );

@@ -3,7 +3,7 @@ import { useRouter } from "next/router";
 import dynamic from "next/dynamic";
 import Link from "next/link";
 import WalletConnect from "@/components/WalletConnect";
-import { createProjectUpdate, createProjectVerificationApplication, csrfFetch, fetchImpactProject, fetchProject, fetchProjectDonations, fetchProjectMatches, fetchProjectVerification, isAdminAuthenticated, parseApiFetchResponse, recordProjectVerificationDecision, requestProjectVerificationChallenge, submitProjectVerificationWalletProof, updateProjectStatus, updateProjectVerificationApplicationStatus } from "@/lib/api";
+import { API_CLIENT_HEADERS, createProjectUpdate, createProjectVerificationApplication, csrfFetch, fetchImpactProject, fetchProject, fetchProjectDonations, fetchProjectMatches, fetchProjectVerification, isAdminAuthenticated, parseApiFetchResponse, recordProjectVerificationDecision, requestProjectVerificationChallenge, submitProjectVerificationWalletProof, updateProjectStatus, updateProjectVerificationApplicationStatus } from "@/lib/api";
 import type { ImpactProjectStats } from "@/lib/api";
 import { buildMilestoneTransaction, submitTransaction } from "@/lib/stellar";
 import { useDonationSocket } from "@/hooks/useDonationSocket";
@@ -99,7 +99,9 @@ export default function ProjectAdmin({ publicKey, onConnect }: AdminProps) {
     Promise.all([
       fetchProject(projectId),
       fetchProjectDonations(projectId, 200).then((r) => r.donations),
-      fetch(`${process.env.NEXT_PUBLIC_API_URL || ""}/api/v1/projects/${projectId}/milestones`).then(r => r.json()),
+      fetch(`${process.env.NEXT_PUBLIC_API_URL || ""}/api/v1/projects/${projectId}/milestones`, {
+        headers: API_CLIENT_HEADERS,
+      }).then(r => r.json()),
       fetchProjectMatches(projectId).catch(() => []),
       fetchProjectVerification(projectId).catch(() => null),
       fetchImpactProject(projectId).catch(() => null),
