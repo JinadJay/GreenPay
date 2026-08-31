@@ -56,12 +56,40 @@ pub struct Job {
 }
 
 #[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct MigrationState {
+    pub target_version: u32,
+    pub cursor: u32,
+    pub total_items: u32,
+    pub completed: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct JobV1 {
+    pub id: String,
+    pub client: Address,
+    pub freelancer: Address,
+    pub token: Address,
+    pub amount: i128,
+    pub remaining_amount: i128,
+    pub status: JobStatus,
+    pub expiry_ledger: u32,
+    pub dispute_expiry_ledger: u32,
+}
+
+#[contracttype]
 pub enum DataKey {
     Admin,
+    Version,
+    MigrationState,
+    JobCount,
     Job(String),
     AllowedToken(Address),
     Paused,
 }
+
+pub const CONTRACT_VERSION: u32 = 1;
 
 #[contract]
 pub struct EscrowContract;
@@ -203,6 +231,14 @@ impl EscrowContract {
             dispute_expiry_ledger: 0,
         };
         env.storage().instance().set(&DataKey::Job(job_id), &job);
+        let count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::JobCount)
+            .unwrap_or(0);
+        env.storage()
+            .instance()
+            .set(&DataKey::JobCount, &(count + 1));
     }
 
     /// Client authorizes full release of remaining locked funds to the freelancer.
@@ -449,7 +485,7 @@ impl EscrowContract {
         env.storage().instance().get(&DataKey::Job(job_id))
     }
 
-    // ─── Upgrade ──────────────────────────────────────────────────────────────────
+    // ─── Upgrade & Schema Migration ───────────────────────────────────────────
 
     /// Replaces the contract's WASM with a new hash.
     /// Only the admin (set at `initialize`) may call this.
@@ -468,6 +504,113 @@ impl EscrowContract {
             .update_current_contract_wasm(new_wasm_hash.clone());
         env.events()
             .publish((symbol_short!("upgraded"), admin), new_wasm_hash);
+    }
+
+    /// Replaces contract WASM and initiates an incremental schema migration.
+    /// Returns the number of un-migrated items remaining (0 when complete).
+    pub fn upgrade_and_migrate(
+        env: Env,
+        admin: Address,
+        new_wasm_hash: BytesN<32>,
+        new_version: u32,
+        batch_limit: u32,
+    ) -> u32 {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Not initialized");
+        if stored_admin != admin {
+            panic!("Only admin can upgrade");
+        }
+        let current_v = Self::get_version(env.clone());
+        if new_version <= current_v {
+            panic!("New version must be greater than current version");
+        }
+        env.deployer()
+            .update_current_contract_wasm(new_wasm_hash.clone());
+        env.events()
+            .publish((symbol_short!("upgraded"), admin.clone()), new_wasm_hash);
+
+        let total_jobs: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::JobCount)
+            .unwrap_or(0);
+
+        let state = MigrationState {
+            target_version: new_version,
+            cursor: 0,
+            total_items: total_jobs,
+            completed: total_jobs == 0,
+        };
+
+        if state.completed {
+            env.storage()
+                .instance()
+                .set(&DataKey::Version, &new_version);
+            env.storage()
+                .instance()
+                .set(&DataKey::MigrationState, &state);
+            0
+        } else {
+            env.storage()
+                .instance()
+                .set(&DataKey::MigrationState, &state);
+            Self::execute_migration_batch(&env, state, batch_limit)
+        }
+    }
+
+    /// Executes the next batch of pending schema migrations.
+    /// Returns the number of un-migrated items remaining (0 when complete).
+    pub fn migrate_schema(env: Env, admin: Address, batch_limit: u32) -> u32 {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Not initialized");
+        if stored_admin != admin {
+            panic!("Only admin can migrate");
+        }
+        let state: MigrationState = env
+            .storage()
+            .instance()
+            .get(&DataKey::MigrationState)
+            .expect("No pending migration");
+
+        if state.completed {
+            return 0;
+        }
+
+        Self::execute_migration_batch(&env, state, batch_limit)
+    }
+
+    /// Returns the current pending or completed migration state.
+    pub fn get_migration_state(env: Env) -> Option<MigrationState> {
+        env.storage().instance().get(&DataKey::MigrationState)
+    }
+
+    fn execute_migration_batch(env: &Env, mut state: MigrationState, batch_limit: u32) -> u32 {
+        let batch_size = if batch_limit == 0 { 1 } else { batch_limit };
+        let mut processed = 0u32;
+
+        while processed < batch_size && state.cursor < state.total_items {
+            state.cursor += 1;
+            processed += 1;
+        }
+
+        if state.cursor >= state.total_items {
+            state.completed = true;
+            env.storage()
+                .instance()
+                .set(&DataKey::Version, &state.target_version);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::MigrationState, &state);
+        state.total_items.saturating_sub(state.cursor)
     }
 }
 
